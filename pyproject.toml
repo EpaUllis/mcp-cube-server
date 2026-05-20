@@ -1,7 +1,7 @@
 [project]
 name = "mcp_cube_server"
-version = "0.0.2"
-description = "MCP server for interfacing with Cube.dev REST API"
+version = "0.1.0"
+description = "MCP server for interfacing with Cube.dev REST API (Quinyx fork — bug fixes on top of isaacwasserman/mcp_cube_server 0.0.2)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
