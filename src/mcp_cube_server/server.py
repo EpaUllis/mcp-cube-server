@@ -20,8 +20,15 @@ class CubeClient:
     Route = Literal["meta", "load"]
     max_wait_time = 10
     request_backoff = 1
+    API_PREFIX = "/cubejs-api/v1"
 
     def __init__(self, endpoint: str, api_secret: str, token_payload: dict, logger: logging.Logger):
+        # Cube's REST API lives under /cubejs-api/v1. Append it if the caller
+        # passed the bare host so existing configs (CUBE_ENDPOINT=http://localhost:4000)
+        # keep working.
+        endpoint = endpoint.rstrip("/")
+        if not endpoint.endswith(self.API_PREFIX):
+            endpoint = endpoint + self.API_PREFIX
         self.endpoint = endpoint
         self.api_secret = api_secret
         self.token_payload = token_payload
@@ -39,7 +46,7 @@ class CubeClient:
     def _request(self, route: Route, **params):
         request_time = time.time()
         headers = {"Authorization": self.token}
-        url = f"{self.endpoint if self.endpoint[-1] != '/' else self.endpoint[:-1]}/{route}"
+        url = f"{self.endpoint}/{route}"
         serialized_params = {k: json.dumps(v) for k, v in params.items()}
 
         try:
@@ -190,7 +197,7 @@ def main(credentials, logger):
     @mcp.tool("describe_data")
     def describe_data() -> str:
         """Describe the data available in Cube."""
-        return {"type": "text", "text": data_description()}
+        return data_description()
 
     @mcp.tool("read_data")
     def read_data(query: Query) -> str:
@@ -219,15 +226,7 @@ def main(credentials, logger):
                 "data_id": data_id,
                 "data": data,
             }
-            yaml_output = data_to_yaml(output)
-            json_output = json.dumps(output)
-            return [
-                TextContent(type="text", text=yaml_output),
-                EmbeddedResource(
-                    type="resource",
-                    resource=TextResourceContents(uri=f"data://{data_id}", text=json_output, mimeType="application/json"),
-                ),
-            ]
+            return data_to_yaml(output)
 
         except Exception as e:
             logger.error("Error in read_data: %s", str(e))
