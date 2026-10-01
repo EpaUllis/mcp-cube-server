@@ -5,7 +5,10 @@ description = "MCP server for interfacing with Cube.dev REST API (Quinyx fork â€
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.2.1",
+    # <2: mcp 2.x renamed FastMCP to MCPServer and changed APIs. Unpinned, a
+    # `pipx install --force` resolved to 2.x and the server failed on import
+    # (2026-10-01). Migrate deliberately, not by accident.
+    "mcp>=1.2.1,<2",
     "pandas",
     "pyjwt>=2.10.1",
     "python-dotenv",
