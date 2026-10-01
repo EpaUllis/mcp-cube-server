@@ -42,19 +42,29 @@ def main():
     required = {
         "endpoint": os.getenv("CUBE_ENDPOINT"),
         "api_secret": os.getenv("CUBE_API_SECRET"),
+        "token": os.getenv("CUBE_TOKEN"),
         "token_payload": os.getenv("CUBE_TOKEN_PAYLOAD", "{}"),
     }
 
     parser.add_argument(
         "--endpoint", required=not required["endpoint"], default=required["endpoint"]
     )
-    parser.add_argument(
-        "--api_secret",
-        required=not required["api_secret"],
-        default=required["api_secret"],
-    )
+    # Two ways to authenticate, and exactly one is needed:
+    #   --token / CUBE_TOKEN            a JWT somebody else minted. The process
+    #                                   then holds a credential with fixed claims,
+    #                                   never the key that mints credentials.
+    #   --api_secret / CUBE_API_SECRET  the signing secret; the server mints its
+    #                                   own JWT from CUBE_TOKEN_PAYLOAD (+ extra
+    #                                   --key value args). Local development only.
+    parser.add_argument("--token", required=False, default=required["token"])
+    parser.add_argument("--api_secret", required=False, default=required["api_secret"])
 
     args, unknown = parser.parse_known_args()
+    if not args.token and not args.api_secret:
+        parser.error(
+            "no credential: set CUBE_TOKEN (a pre-minted JWT) or CUBE_API_SECRET "
+            "(the signing secret), or pass --token / --api_secret"
+        )
     additional_kwargs = args_to_kwargs(unknown)
 
     token_payload = json.loads(required["token_payload"])
@@ -82,6 +92,7 @@ def main():
         credentials = {
             "endpoint": args.endpoint,
             "api_secret": args.api_secret,
+            "token": args.token,
             "token_payload": token_payload,
         }
     except json.JSONDecodeError:

@@ -22,7 +22,14 @@ class CubeClient:
     request_backoff = 1
     API_PREFIX = "/cubejs-api/v1"
 
-    def __init__(self, endpoint: str, api_secret: str, token_payload: dict, logger: logging.Logger):
+    def __init__(
+        self,
+        endpoint: str,
+        api_secret: Optional[str],
+        token_payload: dict,
+        logger: logging.Logger,
+        token: Optional[str] = None,
+    ):
         # Cube's REST API lives under /cubejs-api/v1. Append it if the caller
         # passed the bare host so existing configs (CUBE_ENDPOINT=http://localhost:4000)
         # keep working.
@@ -32,12 +39,18 @@ class CubeClient:
         self.endpoint = endpoint
         self.api_secret = api_secret
         self.token_payload = token_payload
+        # A pre-minted token is used as-is; otherwise one is minted from the secret.
+        self.static_token = token
         self.token = None
         self.logger = logger
         self._refresh_token()
         self.meta = self.describe()
 
     def _generate_token(self):
+        if self.static_token:
+            return self.static_token
+        if not self.api_secret:
+            raise ValueError("no credential: neither a pre-minted token nor an API secret was given")
         return jwt.encode(self.token_payload, self.api_secret, algorithm="HS256")
 
     def _refresh_token(self):

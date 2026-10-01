@@ -54,6 +54,16 @@ pipx install git+https://github.com/EpaUllis/mcp-cube-server.git
 
 `CUBE_ENDPOINT` can be either the host (`http://localhost:4000`) or include the API prefix (`http://localhost:4000/cubejs-api/v1`). Both work.
 
+### Token instead of secret (0.1.1)
+
+Set `CUBE_TOKEN` to a JWT somebody else minted and leave `CUBE_API_SECRET` out. The server then
+sends that token verbatim and never holds the signing key, which is the right shape for an agent
+operator: a credential with fixed claims, not the key that mints credentials. `CUBE_API_SECRET`
+(the server mints its own JWT from `CUBE_TOKEN_PAYLOAD`) stays for local development. One of the
+two is required; the server exits with a usage error if neither is set.
+
+Tests: `PYTHONPATH=src python -m unittest tests/test_token_mode.py`.
+
 ## License
 
 GPL-3.0 (inherited from upstream).
