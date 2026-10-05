@@ -5,4 +5,5 @@ logs/*
 uv.lock
 src/mcp_cube_server/__pycache__
 **/.DS_Store
-dist
+dist__pycache__/
+*.pyc
