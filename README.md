@@ -64,6 +64,15 @@ two is required; the server exits with a usage error if neither is set.
 
 Tests: `PYTHONPATH=src python -m unittest tests/test_token_mode.py`.
 
+### Longer wait for slow queries
+
+Cube answers `Continue wait` while the warehouse runs a query. Upstream gave up after 10
+seconds and returned "Request timed out"; the server now waits up to 90 seconds, set with
+`CUBE_MAX_WAIT_SECONDS`. When it does give up, the error tells the model not to resend the query
+at once and to ask for less, since a resent query adds load to a Cube that is already busy.
+
+Tests: `PYTHONPATH=src python -m unittest tests/test_wait.py`.
+
 ## License
 
 GPL-3.0 (inherited from upstream).

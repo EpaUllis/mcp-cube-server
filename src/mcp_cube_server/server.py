@@ -8,6 +8,7 @@ import requests
 import json
 import logging
 import yaml
+import os
 import uuid
 import time
 
@@ -18,7 +19,10 @@ def data_to_yaml(data: Any) -> str:
 
 class CubeClient:
     Route = Literal["meta", "load"]
-    max_wait_time = 10
+    # Cube answers "Continue wait" while the warehouse runs a query. Queries can take
+    # longer than the original 10 seconds, and a model told "timed out" may resend
+    # at once, adding load. CUBE_MAX_WAIT_SECONDS overrides the limit.
+    max_wait_time = int(os.getenv("CUBE_MAX_WAIT_SECONDS", "90"))
     request_backoff = 1
     API_PREFIX = "/cubejs-api/v1"
 
@@ -69,7 +73,11 @@ class CubeClient:
             while response.json().get("error") == "Continue wait":
                 if time.time() - request_time > self.max_wait_time:
                     self.logger.error(f"Request timed out after {self.max_wait_time} seconds")
-                    return {"error": "Request timed out. Something may have gone wrong or the request may be too complex."}
+                    return {"error": (
+                        f"Cube did not finish this query within {self.max_wait_time} seconds. "
+                        "Do not resend it straight away: that adds load to a busy Cube. Wait a minute, "
+                        "or ask for less (a shorter date range, a coarser granularity, fewer dimensions)."
+                    )}
                 self.logger.warning(f"Request incomplete, polling again in {self.request_backoff} second(s)")
                 time.sleep(self.request_backoff)
                 response = requests.get(url, headers=headers, params=serialized_params)
