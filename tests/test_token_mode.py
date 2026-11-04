@@ -24,12 +24,12 @@ class CredentialTests(unittest.TestCase):
     def _client(self, **kwargs):
         seen = {}
 
-        def fake_get(url, headers=None, params=None):
+        def fake_get(url, headers=None, params=None, timeout=None):
             seen["authorization"] = headers["Authorization"]
             return FakeResponse()
 
         with mock.patch.object(server.requests, "get", fake_get):
-            server.CubeClient(endpoint="http://cube.test:4000", logger=logging.getLogger("t"), **kwargs)
+            server.CubeClient(endpoint="http://cube.test:4000", logger=logging.getLogger("t"), **kwargs).describe()
         return seen["authorization"]
 
     def test_pre_minted_token_is_sent_verbatim_and_needs_no_secret(self):

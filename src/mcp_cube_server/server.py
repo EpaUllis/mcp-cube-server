@@ -23,6 +23,10 @@ class CubeClient:
     # longer than the original 10 seconds, and a model told "timed out" may resend
     # at once, adding load. CUBE_MAX_WAIT_SECONDS overrides the limit.
     max_wait_time = int(os.getenv("CUBE_MAX_WAIT_SECONDS", "90"))
+    # Without a timeout an unreachable Cube hangs a request forever. Connect and read are
+    # separate so a slow answer from a reachable Cube is not cut off by the connect limit.
+    connect_timeout = int(os.getenv("CUBE_REQUEST_TIMEOUT_SECONDS", "10"))
+    read_timeout = int(os.getenv("CUBE_READ_TIMEOUT_SECONDS", "60"))
     request_backoff = 1
     API_PREFIX = "/cubejs-api/v1"
 
@@ -47,8 +51,9 @@ class CubeClient:
         self.static_token = token
         self.token = None
         self.logger = logger
+        # No call to Cube here: the server must start even when Cube is unreachable.
+        # Every tool call fetches what it needs, and reports the error if Cube is down.
         self._refresh_token()
-        self.meta = self.describe()
 
     def _generate_token(self):
         if self.static_token:
@@ -60,14 +65,17 @@ class CubeClient:
     def _refresh_token(self):
         self.token = self._generate_token()
 
+    def _get(self, url, params):
+        return requests.get(url, headers={"Authorization": self.token}, params=params,
+                            timeout=(self.connect_timeout, self.read_timeout))
+
     def _request(self, route: Route, **params):
         request_time = time.time()
-        headers = {"Authorization": self.token}
         url = f"{self.endpoint}/{route}"
         serialized_params = {k: json.dumps(v) for k, v in params.items()}
 
         try:
-            response = requests.get(url, headers=headers, params=serialized_params)
+            response = self._get(url, serialized_params)
 
             # Handle "continue wait" responses
             while response.json().get("error") == "Continue wait":
@@ -80,13 +88,13 @@ class CubeClient:
                     )}
                 self.logger.warning(f"Request incomplete, polling again in {self.request_backoff} second(s)")
                 time.sleep(self.request_backoff)
-                response = requests.get(url, headers=headers, params=serialized_params)
+                response = self._get(url, serialized_params)
 
             # Handle 403 responses by trying to refresh the token once
             if response.status_code == 403:
                 self.logger.warning("Received 403, attempting token refresh")
                 self._refresh_token()
-                return requests.get(url, headers=headers, params=serialized_params)
+                response = self._get(url, serialized_params)
 
             if response.status_code != 200:
                 self.logger.error(f"Request failed with error: {str(response.json().get('error'))}")

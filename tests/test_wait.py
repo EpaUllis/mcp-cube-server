@@ -37,7 +37,7 @@ class WaitTests(unittest.TestCase):
         """Cube says Continue wait `waits` times, one simulated second apart, then answers."""
         calls = {"n": 0}
 
-        def fake_get(url, headers=None, params=None):
+        def fake_get(url, headers=None, params=None, timeout=None):
             calls["n"] += 1
             if url.endswith("/meta"):
                 return FakeResponse({"cubes": []})
