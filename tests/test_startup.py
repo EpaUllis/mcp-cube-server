@@ -66,14 +66,18 @@ class TimeoutTests(unittest.TestCase):
     def test_every_call_has_a_connect_and_read_timeout(self):
         seen = self._timeouts_seen(waits=2)
         self.assertEqual(len(seen), 3)
-        self.assertEqual(seen, [(10, 60)] * 3)
+        self.assertEqual(seen, [(10, 90)] * 3)
 
     def test_timeouts_default_and_follow_the_environment(self):
         env = {k: v for k, v in os.environ.items()
-               if k not in ("CUBE_REQUEST_TIMEOUT_SECONDS", "CUBE_READ_TIMEOUT_SECONDS")}
+               if k not in ("CUBE_REQUEST_TIMEOUT_SECONDS", "CUBE_READ_TIMEOUT_SECONDS",
+                            "CUBE_MAX_WAIT_SECONDS")}
         with mock.patch.dict(os.environ, env, clear=True):
             reloaded = importlib.reload(server).CubeClient
-            self.assertEqual((reloaded.connect_timeout, reloaded.read_timeout), (10, 60))
+            self.assertEqual((reloaded.connect_timeout, reloaded.read_timeout), (10, 90))
+        with mock.patch.dict(os.environ, dict(env, CUBE_MAX_WAIT_SECONDS="120"), clear=True):
+            reloaded = importlib.reload(server).CubeClient
+            self.assertEqual(reloaded.read_timeout, 120)
         with mock.patch.dict(os.environ, {"CUBE_REQUEST_TIMEOUT_SECONDS": "5",
                                           "CUBE_READ_TIMEOUT_SECONDS": "120"}):
             reloaded = importlib.reload(server).CubeClient

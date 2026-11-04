@@ -25,8 +25,10 @@ class CubeClient:
     max_wait_time = int(os.getenv("CUBE_MAX_WAIT_SECONDS", "90"))
     # Without a timeout an unreachable Cube hangs a request forever. Connect and read are
     # separate so a slow answer from a reachable Cube is not cut off by the connect limit.
+    # Cube may hold one answer open while a query runs, so the read limit defaults to the
+    # wait limit: no query the wait would allow is cut off earlier by the read.
     connect_timeout = int(os.getenv("CUBE_REQUEST_TIMEOUT_SECONDS", "10"))
-    read_timeout = int(os.getenv("CUBE_READ_TIMEOUT_SECONDS", "60"))
+    read_timeout = int(os.getenv("CUBE_READ_TIMEOUT_SECONDS", str(max_wait_time)))
     request_backoff = 1
     API_PREFIX = "/cubejs-api/v1"
 

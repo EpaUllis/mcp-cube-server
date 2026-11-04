@@ -73,13 +73,13 @@ at once and to ask for less, since a resent query adds load to a Cube that is al
 
 Tests: `PYTHONPATH=src python -m unittest tests/test_wait.py`.
 
-### Starting when Cube is unreachable (0.1.2)
+### Starting when Cube is unreachable (0.1.2, read limit 0.1.3)
 
 Upstream fetched Cube's metadata at startup, with no timeout, and never used the answer. If
 Cube could not be reached, the server hung before it started and the MCP client dropped it.
 The server now starts without calling Cube, and every call to Cube has a connect timeout
 (`CUBE_REQUEST_TIMEOUT_SECONDS`, default 10) and a read timeout (`CUBE_READ_TIMEOUT_SECONDS`,
-default 60), so an unreachable Cube becomes an error on the tool call instead of a hang. The
+default `CUBE_MAX_WAIT_SECONDS`, so 90), so an unreachable Cube becomes an error on the tool call instead of a hang. The
 retry after a 403 now sends the refreshed token and returns the parsed answer.
 
 Tests: `PYTHONPATH=src python -m unittest tests/test_startup.py`.
