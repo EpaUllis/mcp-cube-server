@@ -100,6 +100,60 @@ retry after a 403 now sends the refreshed token and returns the parsed answer.
 
 Tests: `PYTHONPATH=src python -m unittest tests/test_startup.py`.
 
+## Remote mode (OAuth) (0.2.0)
+
+Opt-in. Without `MCP_TRANSPORT` the server runs over stdio exactly as above.
+
+With `MCP_TRANSPORT=streamable-http` the server listens over HTTP and is an OAuth resource
+server for an OIDC issuer, usable as a remote MCP server (for example a custom connector in
+Claude). The client signs each person in at the issuer and sends their access token. The
+server:
+
+- answers a request without a valid token with `401` and
+  `WWW-Authenticate: Bearer ... resource_metadata="<metadata URL>"`;
+- serves RFC 9728 protected resource metadata at
+  `/.well-known/oauth-protected-resource<path of MCP_PUBLIC_URL>`, with `resource` equal to
+  `MCP_PUBLIC_URL` and `authorization_servers` equal to `[OIDC_ISSUER]`;
+- verifies a JWT access token against the issuer's JWKS (from OIDC discovery): signature,
+  `iss`, `exp`, and `aud` if `OIDC_AUDIENCE` is set. A token that is not a JWT is checked at
+  the issuer's userinfo endpoint, and the answer is cached briefly;
+- for each call, mints a Cube JWT signed with `CUBE_API_SECRET`:
+  `{"sub": <email>, "groups": [...], "agent": true}`, valid for 5 minutes, so Cube's
+  security context names the person;
+- returns query rows only: `data://` resources are not registered, since every signed-in
+  person could list them.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MCP_TRANSPORT` | `stdio` | `streamable-http` for remote mode |
+| `MCP_HOST` / `MCP_PORT` | `127.0.0.1` / `8000` | Listen address (the Dockerfile sets `0.0.0.0`) |
+| `MCP_AUTH` | `oauth` | `none` turns authentication off; local testing only |
+| `MCP_PUBLIC_URL` | required | The MCP URL as users enter it, e.g. `https://mcp.example.com/mcp` |
+| `MCP_HTTP_PATH` | path of `MCP_PUBLIC_URL` | Path the server serves MCP on, if a proxy rewrites it |
+| `MCP_HEALTH_PATH` | `/health` | Unauthenticated health check, answers `200 ok` |
+| `MCP_STATELESS_HTTP` | `false` | `true` for a new MCP session per request (several replicas) |
+| `OIDC_ISSUER` | required | Issuer URL, exactly as in the issuer's discovery document |
+| `OIDC_AUDIENCE` | unset | Required `aud` of JWT access tokens; unset means not checked |
+| `OIDC_JWT_ALGORITHMS` | `RS256` | Comma-separated JWT algorithms accepted |
+| `OIDC_EMAIL_CLAIM` | `email` | Claim holding the person's email (becomes Cube `sub`) |
+| `OIDC_GROUPS_CLAIM` | `groups` | Claim holding the person's groups |
+| `OIDC_SCOPES` | unset | Space-separated scopes advertised as `scopes_supported` |
+| `OIDC_REQUIRED_SCOPES` | unset | Space-separated scopes a token must carry |
+| `OIDC_USERINFO_CACHE_SECONDS` | `60` | How long a userinfo answer is reused |
+| `OIDC_LEEWAY_SECONDS` | `0` | Clock skew allowed on `exp` |
+| `CUBE_API_SECRET` | required | Signs the per-person Cube JWT. `CUBE_TOKEN` is refused in this mode |
+| `CUBE_USER_TOKEN_TTL_SECONDS` | `300` | Lifetime of the per-person Cube JWT |
+
+`MCP_PUBLIC_URL` and `OIDC_ISSUER` must be written the way they are published (a bare host
+needs its trailing slash, the host in lower case, no default port); the server refuses to
+start otherwise, because the metadata would not match the URL.
+
+Without `OIDC_AUDIENCE`, and always for tokens checked at userinfo, any access token the issuer
+accepts is accepted here, whichever application it was issued to.
+
+Tests: `PYTHONPATH=src python -m unittest tests/test_remote_oauth.py` (a fake issuer runs
+in-process; no network).
+
 ## License
 
 GPL-3.0 (inherited from upstream).

@@ -21,5 +21,10 @@ COPY src /app/src
 # Install the project
 RUN pip install --no-cache-dir /app
 
+# Remote mode (MCP_TRANSPORT=streamable-http) must listen on all interfaces to be reachable
+# from outside the container. stdio mode ignores these.
+ENV MCP_HOST=0.0.0.0 MCP_PORT=8000
+EXPOSE 8000
+
 # Run the server
 ENTRYPOINT ["mcp_cube_server"]

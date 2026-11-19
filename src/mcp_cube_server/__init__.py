@@ -7,6 +7,7 @@ import os
 import dotenv
 
 from . import server
+from .remote import RemoteConfig, _env_bool
 
 
 def args_to_kwargs(unknown):
@@ -58,6 +59,9 @@ def main():
     #                                   --key value args). Local development only.
     parser.add_argument("--token", required=False, default=required["token"])
     parser.add_argument("--api_secret", required=False, default=required["api_secret"])
+    # Remote mode is opt-in. stdio (the default) is the local server, unchanged.
+    parser.add_argument("--transport", choices=["stdio", "streamable-http"],
+                        default=os.getenv("MCP_TRANSPORT", "stdio"))
 
     args, unknown = parser.parse_known_args()
     if not args.token and not args.api_secret:
@@ -88,6 +92,23 @@ def main():
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
+    remote = None
+    if args.transport == "streamable-http":
+        # Over HTTP anyone who can reach the port can call the tools, so OAuth is the
+        # default; MCP_AUTH=none turns it off deliberately (local testing only).
+        auth_mode = os.getenv("MCP_AUTH", "oauth")
+        if auth_mode not in ("oauth", "none"):
+            parser.error(f"MCP_AUTH={auth_mode!r}: use oauth or none")
+        if auth_mode == "oauth":
+            try:
+                remote = RemoteConfig.from_env()
+            except ValueError as e:
+                parser.error(str(e))
+            if not args.api_secret:
+                parser.error("OAuth mode mints a Cube JWT per person and needs CUBE_API_SECRET")
+            if args.token:
+                parser.error("OAuth mode does not use CUBE_TOKEN: unset it")
+
     try:
         credentials = {
             "endpoint": args.endpoint,
@@ -102,6 +123,11 @@ def main():
     server.main(
         credentials,
         logger,
+        transport=args.transport,
+        remote=remote,
+        host=os.getenv("MCP_HOST", "127.0.0.1"),
+        port=int(os.getenv("MCP_PORT", "8000")),
+        stateless_http=_env_bool("MCP_STATELESS_HTTP"),
     )
 
 

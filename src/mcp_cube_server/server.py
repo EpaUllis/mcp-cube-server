@@ -1,10 +1,16 @@
 from __future__ import annotations
 from typing import Annotated, Any, Literal, Optional, Union
 import anyio
+from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
+from mcp.server.auth.routes import create_protected_resource_routes
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ClientCapabilities, ElicitationCapability, TextContent, EmbeddedResource, TextResourceContents
 import jwt
-from pydantic import BaseModel, Field
+from pydantic import AnyHttpUrl, BaseModel, Field
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse, Response
 import requests
 import json
 import logging
@@ -12,6 +18,8 @@ import yaml
 import os
 import uuid
 import time
+
+from .remote import OIDCTokenVerifier, RemoteConfig, mint_cube_token
 
 
 def data_to_yaml(data: Any) -> str:
@@ -40,6 +48,7 @@ class CubeClient:
         token_payload: dict,
         logger: logging.Logger,
         token: Optional[str] = None,
+        per_user: bool = False,
     ):
         # Cube's REST API lives under /cubejs-api/v1. Append it if the caller
         # passed the bare host so existing configs (CUBE_ENDPOINT=http://localhost:4000)
@@ -54,6 +63,10 @@ class CubeClient:
         self.static_token = token
         self.token = None
         self.logger = logger
+        # Remote mode: every call must carry the caller's own Cube token. The client then
+        # holds no token of its own, so a call without one fails instead of running with a
+        # token that names nobody.
+        self.per_user = per_user
         # No call to Cube here: the server must start even when Cube is unreachable.
         # Every tool call fetches what it needs, and reports the error if Cube is down.
         self._refresh_token()
@@ -66,19 +79,25 @@ class CubeClient:
         return jwt.encode(self.token_payload, self.api_secret, algorithm="HS256")
 
     def _refresh_token(self):
+        if self.per_user:
+            self.token = None
+            return
         self.token = self._generate_token()
 
-    def _get(self, url, params):
-        return requests.get(url, headers={"Authorization": self.token}, params=params,
+    def _get(self, url, params, auth_token=None):
+        token = auth_token or self.token
+        if not token:
+            raise ValueError("no Cube token for this call")
+        return requests.get(url, headers={"Authorization": token}, params=params,
                             timeout=(self.connect_timeout, self.read_timeout))
 
-    def _request(self, route: Route, **params):
+    def _request(self, route: Route, auth_token: Optional[str] = None, **params):
         request_time = time.time()
         url = f"{self.endpoint}/{route}"
         serialized_params = {k: json.dumps(v) for k, v in params.items()}
 
         try:
-            response = self._get(url, serialized_params)
+            response = self._get(url, serialized_params, auth_token)
 
             # Handle "continue wait" responses
             while response.json().get("error") == "Continue wait":
@@ -96,10 +115,11 @@ class CubeClient:
                     )}
                 self.logger.warning(f"Request incomplete, polling again in {self.request_backoff} second(s)")
                 time.sleep(self.request_backoff)
-                response = self._get(url, serialized_params)
+                response = self._get(url, serialized_params, auth_token)
 
             # Handle 403 responses by trying to refresh the token once
-            if response.status_code == 403:
+            # A per-call token was minted for this call; minting again would not change it.
+            if response.status_code == 403 and not auth_token:
                 self.logger.warning("Received 403, attempting token refresh")
                 self._refresh_token()
                 response = self._get(url, serialized_params)
@@ -113,8 +133,8 @@ class CubeClient:
             self.logger.error(f"Request failed with error: {str(e)}")
             return {"error": f"Request failed: {str(e)}"}
 
-    def describe(self):
-        return self._request("meta")
+    def describe(self, auth_token: Optional[str] = None):
+        return self._request("meta", auth_token=auth_token)
 
     def _cast_numerics(self, response):
         if response.get("data") and response.get("annotation"):
@@ -137,8 +157,8 @@ class CubeClient:
                         pass
         return response
 
-    def query(self, query, cast_numerics=True):
-        response = self._request("load", query=query)
+    def query(self, query, cast_numerics=True, auth_token: Optional[str] = None):
+        response = self._request("load", auth_token=auth_token, query=query)
         if cast_numerics:
             response = self._cast_numerics(response)
         return response
@@ -210,15 +230,49 @@ class Query(BaseModel):
     model_config = {"exclude_none": True}
 
 
-def build_server(credentials, logger) -> FastMCP:
-    mcp = FastMCP("Cube.dev")
+def build_server(credentials, logger, remote: Optional[RemoteConfig] = None,
+                 token_verifier=None, **fastmcp_settings) -> FastMCP:
+    """Without `remote`: the local server, one Cube credential for every call (stdio).
+    With `remote`: OAuth resource server; each call runs as the person whose bearer token
+    came with it, through a Cube JWT minted for that call."""
+    if remote is None:
+        mcp = FastMCP("Cube.dev", **fastmcp_settings)
+        client = CubeClient(**credentials, logger=logger)
+    else:
+        if not credentials.get("api_secret"):
+            raise ValueError("OAuth mode mints a Cube JWT per person and needs CUBE_API_SECRET")
+        if credentials.get("token"):
+            raise ValueError("OAuth mode does not use CUBE_TOKEN: it would give every person the same identity")
+        if token_verifier is None:
+            token_verifier = OIDCTokenVerifier(remote, logger)
+        auth = AuthSettings(
+            issuer_url=remote.issuer,
+            resource_server_url=remote.public_url,
+            required_scopes=remote.required_scopes or None,
+            # The verifier checks the audience itself (OIDC_AUDIENCE).
+            validate_token_resource=False,
+        )
+        mcp = FastMCP("Cube.dev", auth=auth, token_verifier=token_verifier,
+                      streamable_http_path=remote.http_path, **fastmcp_settings)
+        client = CubeClient(**dict(credentials, token=None), logger=logger, per_user=True)
 
-    client = CubeClient(**credentials, logger=logger)
+    def cube_token_for_this_call() -> Optional[str]:
+        """Local mode: None (the client's own token is used). Remote mode: a Cube JWT for
+        the person whose bearer token came with this MCP request."""
+        if remote is None:
+            return None
+        request = mcp.get_context().request_context.request
+        user = request.scope.get("user") if request is not None else None
+        if not isinstance(user, AuthenticatedUser):
+            raise PermissionError("no authenticated person on this request")
+        claims = user.access_token.claims or {}
+        return mint_cube_token(credentials["api_secret"], claims["email"], claims.get("groups", []),
+                               remote.cube_token_ttl_seconds)
 
     @mcp.resource("context://data_description")
     def data_description() -> str:
         """Describe the data available in Cube."""
-        meta = client.describe()
+        meta = client.describe(auth_token=cube_token_for_this_call())
         if error := meta.get("error"):
             logger.error("Error in data_description: %s\n\n%s", error, meta.get("stack"))
             logger.error("Full response: %s", json.dumps(meta))
@@ -271,8 +325,13 @@ def build_server(credentials, logger) -> FastMCP:
         try:
             query_dict = query.model_dump(by_alias=True, exclude_none=True)
             logger.info("read_data called with query: %s", json.dumps(query_dict))
+            cube_token = cube_token_for_this_call()
+
+            def run_query():
+                return client.query(query_dict, auth_token=cube_token)
+
             # requests blocks; run it off the event loop so the server stays responsive.
-            response = await anyio.to_thread.run_sync(client.query, query_dict)
+            response = await anyio.to_thread.run_sync(run_query)
             extensions = 0
             while response.get("still_running") and extensions < MAX_EXTENSIONS and can_ask(ctx):
                 # The client shows this to the person; the model cannot answer it.
@@ -290,13 +349,18 @@ def build_server(credentials, logger) -> FastMCP:
                     return ("Stopped waiting: the user chose not to wait longer. Offer something smaller "
                             "(a shorter date range, fewer dimensions) or to try again later.")
                 extensions += 1
-                response = await anyio.to_thread.run_sync(client.query, query_dict)
+                response = await anyio.to_thread.run_sync(run_query)
             if error := response.get("error"):
                 logger.error("Error in read_data: %s\n\n%s", error, response.get("stack"))
                 logger.error("Full response: %s", json.dumps(response))
                 return f"Error: {error}"
             data = response.get("data", [])
             logger.info("read_data returned %s rows", len(data))
+
+            if remote is not None:
+                # A data:// resource is registered on the server, not the session: every
+                # signed-in person could list and read it. Remote mode returns the rows only.
+                return data_to_yaml({"type": "data", "data": data})
 
             data_id = str(uuid.uuid4())
 
@@ -320,7 +384,46 @@ def build_server(credentials, logger) -> FastMCP:
     return mcp
 
 
-def main(credentials, logger):
-    mcp = build_server(credentials, logger)
-    logger.info("Starting Cube MCP server")
-    mcp.run()
+def http_app(mcp: FastMCP, remote: Optional[RemoteConfig]) -> Starlette:
+    """The streamable HTTP app, with a health route for a load balancer. In OAuth mode the
+    SDK publishes the protected resource metadata (RFC 9728) and answers a request without a
+    valid token with 401 and `WWW-Authenticate: Bearer ... resource_metadata="..."`."""
+    health_path = remote.health_path if remote else os.getenv("MCP_HEALTH_PATH", "/health")
+
+    async def health(request: Request) -> Response:
+        return PlainTextResponse("ok")
+
+    # Custom routes are not behind the SDK's auth: the load balancer has no token.
+    mcp.custom_route(health_path, methods=["GET"])(health)
+    app = mcp.streamable_http_app()
+    if remote is not None and remote.scopes_supported:
+        # The SDK advertises required_scopes as scopes_supported. Claude asks the issuer for
+        # the scopes in scopes_supported, which need not be the scopes enforced on the token.
+        wanted = create_protected_resource_routes(
+            resource_url=AnyHttpUrl(remote.public_url),
+            authorization_servers=[AnyHttpUrl(remote.issuer)],
+            scopes_supported=remote.scopes_supported,
+        )
+        paths = {route.path for route in wanted}
+        app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", None) not in paths]
+        app.router.routes[0:0] = wanted
+    return app
+
+
+def main(credentials, logger, transport: str = "stdio", remote: Optional[RemoteConfig] = None,
+         host: str = "127.0.0.1", port: int = 8000, stateless_http: bool = False):
+    if transport == "stdio":
+        mcp = build_server(credentials, logger)
+        logger.info("Starting Cube MCP server")
+        mcp.run()
+        return
+    if transport != "streamable-http":
+        raise ValueError(f"unknown transport {transport!r}: use stdio or streamable-http")
+    import uvicorn
+
+    mcp = build_server(credentials, logger, remote=remote, host=host, port=port,
+                       stateless_http=stateless_http)
+    app = http_app(mcp, remote)
+    logger.info("Starting Cube MCP server on %s:%s (%s)", host, port,
+                "OAuth" if remote else "no authentication")
+    uvicorn.run(app, host=host, port=port, log_level=mcp.settings.log_level.lower())
