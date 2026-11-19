@@ -6,6 +6,7 @@ Run: PYTHONPATH=src python -m unittest tests/test_remote_oauth.py
 """
 import json
 import logging
+import threading
 import os
 import sys
 import time
@@ -103,6 +104,7 @@ def call(requests_to_send, config=None, issuer=None):
 
     def fake_get(url, headers=None, params=None, timeout=None):
         cube_auth.append(headers["Authorization"])
+        CUBE_CALL_THREADS.append(threading.current_thread())
         return FakeResponse()
 
     async def go():
@@ -137,6 +139,9 @@ INIT = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
 INITIALIZED = {"jsonrpc": "2.0", "method": "notifications/initialized"}
 READ = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
     "name": "read_data", "arguments": {"query": {"measures": ["m.count"]}}}}
+DESCRIBE = {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
+    "name": "describe_data", "arguments": {}}}
+CUBE_CALL_THREADS = []
 LIST_RESOURCES = {"jsonrpc": "2.0", "id": 3, "method": "resources/list", "params": {}}
 
 
@@ -189,6 +194,20 @@ class ValidTokenTests(unittest.TestCase):
         self.assertFalse(result.get("isError"), result)
         self.assertIn("x: 1", result["content"][0]["text"])
         self.assert_cube_token_names(cube_auth, "person@example.com", ["analysts", "admins"])
+
+    def test_cube_calls_run_off_the_event_loop_as_the_person(self):
+        # A blocking Cube call on the event loop would stall every session and /health.
+        CUBE_CALL_THREADS.clear()
+        responses, cube_auth = call([("POST", "/mcp", make_jwt(), INIT),
+                                     ("POST", "/mcp", make_jwt(), INITIALIZED),
+                                     ("POST", "/mcp", make_jwt(), DESCRIBE)])
+        self.assertEqual([r.status_code for r in responses], [200, 202, 200])
+        result = responses[2].json()["result"]
+        self.assertFalse(result.get("isError"), result)
+        self.assertIn("description of the data", result["content"][0]["text"])
+        self.assert_cube_token_names(cube_auth, "person@example.com", ["analysts", "admins"])
+        self.assertTrue(CUBE_CALL_THREADS)
+        self.assertNotIn(threading.main_thread(), CUBE_CALL_THREADS)
 
     def test_opaque_token_checked_at_userinfo_and_cached(self):
         issuer = FakeIssuer()
@@ -327,6 +346,21 @@ class CliTests(unittest.TestCase):
         self.assertEqual(seen["transport"], "streamable-http")
         self.assertEqual((seen["remote"].public_url, seen["remote"].issuer), (PUBLIC_URL, ISSUER))
         self.assertEqual((seen["host"], seen["port"]), ("0.0.0.0", 9000))
+
+    def test_keep_alive_defaults_to_75_seconds_and_is_configurable(self):
+        env = {"CUBE_ENDPOINT": "http://cube.test:4000", "CUBE_API_SECRET": "s",
+               "MCP_TRANSPORT": "streamable-http", "MCP_PUBLIC_URL": PUBLIC_URL, "OIDC_ISSUER": ISSUER}
+        self.assertEqual(run_cli(env)["keep_alive_seconds"], 75)
+        self.assertEqual(run_cli(dict(env, MCP_KEEP_ALIVE_SECONDS="120"))["keep_alive_seconds"], 120)
+
+    def test_http_main_passes_keep_alive_to_uvicorn(self):
+        import uvicorn
+        seen = {}
+        with mock.patch.object(uvicorn, "run", lambda app, **k: seen.update(k)):
+            server.main(dict(endpoint="http://cube.test:4000", api_secret=CUBE_SECRET, token_payload={},
+                             token=None), logging.getLogger("t"), transport="streamable-http",
+                        remote=remote_config(), keep_alive_seconds=90)
+        self.assertEqual(seen["timeout_keep_alive"], 90)
 
     def test_http_oauth_refuses_cube_token(self):
         with self.assertRaises(SystemExit):

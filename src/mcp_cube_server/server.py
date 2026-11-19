@@ -269,10 +269,7 @@ def build_server(credentials, logger, remote: Optional[RemoteConfig] = None,
         return mint_cube_token(credentials["api_secret"], claims["email"], claims.get("groups", []),
                                remote.cube_token_ttl_seconds)
 
-    @mcp.resource("context://data_description")
-    def data_description() -> str:
-        """Describe the data available in Cube."""
-        meta = client.describe(auth_token=cube_token_for_this_call())
+    def describe_meta(meta: dict) -> str:
         if error := meta.get("error"):
             logger.error("Error in data_description: %s\n\n%s", error, meta.get("stack"))
             logger.error("Full response: %s", json.dumps(meta))
@@ -306,10 +303,21 @@ def build_server(credentials, logger, remote: Optional[RemoteConfig] = None,
             description, indent=2, sort_keys=True
         )
 
-    @mcp.tool("describe_data")
-    def describe_data() -> str:
+    async def data_description_text() -> str:
+        cube_token = cube_token_for_this_call()
+        # requests blocks; run it off the event loop so other sessions and /health stay responsive.
+        meta = await anyio.to_thread.run_sync(lambda: client.describe(auth_token=cube_token))
+        return describe_meta(meta)
+
+    @mcp.resource("context://data_description")
+    async def data_description() -> str:
         """Describe the data available in Cube."""
-        return data_description()
+        return await data_description_text()
+
+    @mcp.tool("describe_data")
+    async def describe_data() -> str:
+        """Describe the data available in Cube."""
+        return await data_description_text()
 
     def can_ask(ctx: Context) -> bool:
         try:
@@ -411,7 +419,8 @@ def http_app(mcp: FastMCP, remote: Optional[RemoteConfig]) -> Starlette:
 
 
 def main(credentials, logger, transport: str = "stdio", remote: Optional[RemoteConfig] = None,
-         host: str = "127.0.0.1", port: int = 8000, stateless_http: bool = False):
+         host: str = "127.0.0.1", port: int = 8000, stateless_http: bool = False,
+         keep_alive_seconds: int = 75):
     if transport == "stdio":
         mcp = build_server(credentials, logger)
         logger.info("Starting Cube MCP server")
@@ -426,4 +435,7 @@ def main(credentials, logger, transport: str = "stdio", remote: Optional[RemoteC
     app = http_app(mcp, remote)
     logger.info("Starting Cube MCP server on %s:%s (%s)", host, port,
                 "OAuth" if remote else "no authentication")
-    uvicorn.run(app, host=host, port=port, log_level=mcp.settings.log_level.lower())
+    # Keep idle connections open longer than a load balancer in front does, so the server never
+    # closes a connection the load balancer is about to reuse (uvicorn's own default is 5 s).
+    uvicorn.run(app, host=host, port=port, log_level=mcp.settings.log_level.lower(),
+                timeout_keep_alive=keep_alive_seconds)

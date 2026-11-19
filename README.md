@@ -100,7 +100,7 @@ retry after a 403 now sends the refreshed token and returns the parsed answer.
 
 Tests: `PYTHONPATH=src python -m unittest tests/test_startup.py`.
 
-## Remote mode (OAuth) (0.2.0)
+## Remote mode (OAuth) (0.2.0, 0.2.1)
 
 Opt-in. Without `MCP_TRANSPORT` the server runs over stdio exactly as above.
 
@@ -131,6 +131,7 @@ server:
 | `MCP_PUBLIC_URL` | required | The MCP URL as users enter it, e.g. `https://mcp.example.com/mcp` |
 | `MCP_HTTP_PATH` | path of `MCP_PUBLIC_URL` | Path the server serves MCP on, if a proxy rewrites it |
 | `MCP_HEALTH_PATH` | `/health` | Unauthenticated health check, answers `200 ok` |
+| `MCP_KEEP_ALIVE_SECONDS` | `75` | How long an idle HTTP connection stays open; keep it longer than the idle timeout of a load balancer in front |
 | `MCP_STATELESS_HTTP` | `false` | `true` for a new MCP session per request (several replicas) |
 | `OIDC_ISSUER` | required | Issuer URL, exactly as in the issuer's discovery document |
 | `OIDC_AUDIENCE` | unset | Required `aud` of JWT access tokens; unset means not checked |

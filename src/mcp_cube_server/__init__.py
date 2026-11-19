@@ -128,6 +128,7 @@ def main():
         host=os.getenv("MCP_HOST", "127.0.0.1"),
         port=int(os.getenv("MCP_PORT", "8000")),
         stateless_http=_env_bool("MCP_STATELESS_HTTP"),
+        keep_alive_seconds=int(os.getenv("MCP_KEEP_ALIVE_SECONDS", "75")),
     )
 
 
