@@ -1,5 +1,5 @@
 """Waiting on Cube's "Continue wait": a slow query inside the limit returns its data;
-one past the limit returns an error that says not to resend at once.
+one past the limit says it is still running and how to keep waiting.
 Run: PYTHONPATH=src python -m unittest tests/test_wait.py
 """
 import importlib
@@ -58,11 +58,12 @@ class WaitTests(unittest.TestCase):
     def test_slow_query_inside_the_limit_returns_data(self):
         self.assertEqual(self._load(waits=30, max_wait=90), {"data": [{"v": 1}]})
 
-    def test_query_past_the_limit_says_not_to_resend(self):
-        # Negative control: the same 30-second query with the old 10-second limit fails.
+    def test_query_past_the_limit_says_still_running(self):
+        # Negative control: the same 30-second query with a 10-second limit is not answered.
         result = self._load(waits=30, max_wait=10)
-        self.assertIn("within 10 seconds", result["error"])
-        self.assertIn("Do not resend it straight away", result["error"])
+        self.assertTrue(result["still_running"])
+        self.assertIn("Still running in Cube after 10 seconds", result["error"])
+        self.assertIn("identical query again", result["error"])
 
     def test_limit_defaults_to_90_and_follows_the_environment(self):
         env = {k: v for k, v in os.environ.items() if k != "CUBE_MAX_WAIT_SECONDS"}

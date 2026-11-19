@@ -1,7 +1,8 @@
 from __future__ import annotations
 from typing import Annotated, Any, Literal, Optional, Union
-from mcp.server.fastmcp import FastMCP
-from mcp.types import TextContent, EmbeddedResource, TextResourceContents
+import anyio
+from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import ClientCapabilities, ElicitationCapability, TextContent, EmbeddedResource, TextResourceContents
 import jwt
 from pydantic import BaseModel, Field
 import requests
@@ -20,8 +21,8 @@ def data_to_yaml(data: Any) -> str:
 class CubeClient:
     Route = Literal["meta", "load"]
     # Cube answers "Continue wait" while the warehouse runs a query. Queries can take
-    # longer than the original 10 seconds, and a model told "timed out" may resend
-    # at once, adding load. CUBE_MAX_WAIT_SECONDS overrides the limit.
+    # longer than the original 10 seconds; past the limit the tool says the query is still
+    # running. CUBE_MAX_WAIT_SECONDS overrides the limit.
     max_wait_time = int(os.getenv("CUBE_MAX_WAIT_SECONDS", "90"))
     # Without a timeout an unreachable Cube hangs a request forever. Connect and read are
     # separate so a slow answer from a reachable Cube is not cut off by the connect limit.
@@ -82,11 +83,16 @@ class CubeClient:
             # Handle "continue wait" responses
             while response.json().get("error") == "Continue wait":
                 if time.time() - request_time > self.max_wait_time:
-                    self.logger.error(f"Request timed out after {self.max_wait_time} seconds")
-                    return {"error": (
-                        f"Cube did not finish this query within {self.max_wait_time} seconds. "
-                        "Do not resend it straight away: that adds load to a busy Cube. Wait a minute, "
-                        "or ask for less (a shorter date range, a coarser granularity, fewer dimensions)."
+                    self.logger.warning(f"Still running after {self.max_wait_time} seconds")
+                    # Each poll is this same request again; Cube answers it from the run in progress.
+                    # Whether a resend after the connector stopped polling still joins that run is
+                    # not verified (live test 2026-11-18 inconclusive), so the text does not claim it.
+                    return {"still_running": True, "error": (
+                        f"Still running in Cube after {self.max_wait_time} seconds. Right after the "
+                        "warehouse has been idle, starting it takes 1 to 2 minutes on its own. Tell the "
+                        "user it is still running and ask whether to keep waiting. If yes, send the "
+                        "identical query again straight away. If not, offer something smaller (a shorter "
+                        "date range, fewer dimensions)."
                     )}
                 self.logger.warning(f"Request incomplete, polling again in {self.request_backoff} second(s)")
                 time.sleep(self.request_backoff)
@@ -138,17 +144,34 @@ class CubeClient:
         return response
 
 
+FilterOperator = Literal[
+    "equals", "notEquals", "contains", "notContains", "startsWith", "notStartsWith",
+    "endsWith", "notEndsWith", "gt", "gte", "lt", "lte", "set", "notSet",
+    "inDateRange", "notInDateRange", "beforeDate", "beforeOrOnDate", "afterDate", "afterOrOnDate",
+]
+
+
 class Filter(BaseModel):
-    dimension: str = Field(..., description="Name of the time dimension")
-    granularity: Literal["second", "minute", "hour", "day", "week", "month", "quarter", "year"] = Field(
-        ..., description="Time granularity"
-    )
-    dateRange: Union[list[str], str] = Field(
+    """One Cube REST filter. Several filters in a query are combined with AND."""
+
+    member: str = Field(..., description="Dimension or measure to filter on, e.g. orders.status")
+    operator: FilterOperator = Field(
         ...,
-        description="Pair of dates ISO dates representing the start and end of the range. Alternatively, a string representing a relative date range of the form: 'last N days', 'today', 'yesterday', 'last year', etc.",
+        description="equals/notEquals: exact match. contains/notContains, startsWith, endsWith: text match, "
+        "case-insensitive. gt/gte/lt/lte: numbers. set/notSet: not null / null, no values. "
+        "inDateRange/notInDateRange: two ISO dates. beforeDate/afterDate (and the OrOn variants): one ISO date.",
+    )
+    values: list[str] = Field(
+        [], description="Values as strings. With several values a row matches if it matches any of them."
     )
 
-    model_config = {"exclude_none": True}
+
+class KeepWaiting(BaseModel):
+    keep_waiting: bool = Field(True, description="Keep waiting for this query")
+
+
+# How many times the person can say "keep waiting" before the tool gives up for this call.
+MAX_EXTENSIONS = int(os.getenv("CUBE_MAX_EXTENSIONS", "3"))
 
 
 class TimeDimension(BaseModel):
@@ -169,7 +192,11 @@ class Query(BaseModel):
     measures: list[str] = Field([], description="Names of measures to query")
     dimensions: list[str] = Field([], description="Names of dimensions to group by")
     timeDimensions: list[TimeDimension] = Field([], description="Time dimensions to group by")
-    # filters: list[Filter] = Field([], description="Filters to apply to the query")
+    filters: list[Filter] = Field(
+        [],
+        description="Filters, applied in the warehouse before anything is returned. To look at a subset, "
+        "filter on it (e.g. orders.status equals 'shipped'); never fetch every row to search the result.",
+    )
     limit: Optional[int] = Field(500, description="Maximum number of rows to return. Defaults to 500")
     offset: Optional[int] = Field(0, description="Number of rows to skip. Defaults to 0")
     order: dict[str, Literal["asc", "desc"]] = Field(
@@ -183,7 +210,7 @@ class Query(BaseModel):
     model_config = {"exclude_none": True}
 
 
-def main(credentials, logger):
+def build_server(credentials, logger) -> FastMCP:
     mcp = FastMCP("Cube.dev")
 
     client = CubeClient(**credentials, logger=logger)
@@ -230,13 +257,40 @@ def main(credentials, logger):
         """Describe the data available in Cube."""
         return data_description()
 
+    def can_ask(ctx: Context) -> bool:
+        try:
+            return ctx.session.check_client_capability(ClientCapabilities(elicitation=ElicitationCapability()))
+        except Exception:
+            return False
+
     @mcp.tool("read_data")
-    def read_data(query: Query) -> str:
-        """Read data from Cube."""
+    async def read_data(query: Query, ctx: Context) -> str:
+        """Read data from Cube. Filter in the query (filters) rather than fetching rows and searching
+        them: to answer about one value of a dimension, filter on that value. If a query is still running
+        after the wait limit, the tool says so; tell the user rather than giving up."""
         try:
             query_dict = query.model_dump(by_alias=True, exclude_none=True)
             logger.info("read_data called with query: %s", json.dumps(query_dict))
-            response = client.query(query_dict)
+            # requests blocks; run it off the event loop so the server stays responsive.
+            response = await anyio.to_thread.run_sync(client.query, query_dict)
+            extensions = 0
+            while response.get("still_running") and extensions < MAX_EXTENSIONS and can_ask(ctx):
+                # The client shows this to the person; the model cannot answer it.
+                waited = (extensions + 1) * client.max_wait_time
+                try:
+                    answer = await ctx.elicit(
+                        f"This Cube query is still running after {waited} seconds. "
+                        f"Keep waiting up to {client.max_wait_time} seconds more?",
+                        KeepWaiting,
+                    )
+                except Exception as e:
+                    logger.warning("elicitation failed: %s", e)
+                    break
+                if not (answer.action == "accept" and answer.data.keep_waiting):
+                    return ("Stopped waiting: the user chose not to wait longer. Offer something smaller "
+                            "(a shorter date range, fewer dimensions) or to try again later.")
+                extensions += 1
+                response = await anyio.to_thread.run_sync(client.query, query_dict)
             if error := response.get("error"):
                 logger.error("Error in read_data: %s\n\n%s", error, response.get("stack"))
                 logger.error("Full response: %s", json.dumps(response))
@@ -263,5 +317,10 @@ def main(credentials, logger):
             logger.error("Error in read_data: %s", str(e))
             return f"Error: {str(e)}"
 
+    return mcp
+
+
+def main(credentials, logger):
+    mcp = build_server(credentials, logger)
     logger.info("Starting Cube MCP server")
     mcp.run()

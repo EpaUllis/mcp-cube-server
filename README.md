@@ -68,10 +68,26 @@ Tests: `PYTHONPATH=src python -m unittest tests/test_token_mode.py`.
 
 Cube answers `Continue wait` while the warehouse runs a query. Upstream gave up after 10
 seconds and returned "Request timed out"; the server now waits up to 90 seconds, set with
-`CUBE_MAX_WAIT_SECONDS`. When it does give up, the error tells the model not to resend the query
-at once and to ask for less, since a resent query adds load to a Cube that is already busy.
+`CUBE_MAX_WAIT_SECONDS`. Past the limit (0.1.5) the tool says the query is still running and
+tells the model to ask the user whether to keep waiting, and if so to send the identical query
+again.
 
 Tests: `PYTHONPATH=src python -m unittest tests/test_wait.py`.
+
+### Filters (0.1.5)
+
+Upstream had the `filters` field commented out (since 2025-01-30), so a model could not ask
+Cube for a subset: it fetched every row and searched them itself. `read_data` now takes
+Cube REST filters, `{member, operator, values}`, applied in the warehouse; several filters
+combine with AND. An unknown operator is rejected before the query reaches Cube.
+
+### Asking the person whether to keep waiting (0.1.5)
+
+When a query is still running at the wait limit and the MCP client supports elicitation, the
+server asks the person, not the model, "keep waiting?", up to `CUBE_MAX_EXTENSIONS` times
+(default 3). A client without elicitation gets the still-running text above instead.
+
+Tests: `PYTHONPATH=src python -m unittest tests/test_filters_and_waiting.py`.
 
 ### Starting when Cube is unreachable (0.1.2, read limit 0.1.3)
 
