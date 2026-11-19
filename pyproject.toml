@@ -9,7 +9,6 @@ dependencies = [
     # `pipx install --force` resolved to 2.x and the server failed on import
     # (2026-10-01). Migrate deliberately, not by accident.
     "mcp>=1.30,<2",  # 1.30: ctx.elicit and check_client_capability, as tested 2026-11-18
-    "pandas",
     "httpx",
     "pyjwt[crypto]>=2.10.1",  # crypto: RS256 for OIDC JWT access tokens (remote mode)
     "python-dotenv",
